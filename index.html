@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Свайпы возможностей</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #1b1b1f);
+    --hint: var(--tg-theme-hint-color, #6b7280);
+    --card: var(--tg-theme-secondary-bg-color, #f3f4f6);
+    --accent: var(--tg-theme-button-color, #2563eb);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    --yes: #16a34a;
+    --no: #dc2626;
+    --warn: #d97706;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: var(--tg-theme-bg-color, #111318); --text: var(--tg-theme-text-color, #f1f1f4);
+            --hint: var(--tg-theme-hint-color, #9aa0aa); --card: var(--tg-theme-secondary-bg-color, #1c1f27); }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+               font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  main { display: flex; flex-direction: column; height: 100%; padding: 12px 16px calc(16px + env(safe-area-inset-bottom)); }
+  header { display: flex; justify-content: space-between; align-items: center; color: var(--hint); font-size: 14px; min-height: 28px; }
+  .stack { position: relative; flex: 1; margin: 8px 0 14px; touch-action: none; }
+  .card { position: absolute; inset: 0; background: var(--card); border-radius: 20px; padding: 20px;
+          display: flex; flex-direction: column; gap: 12px; box-shadow: 0 6px 24px rgba(0,0,0,.12);
+          transition: transform .25s ease, opacity .25s ease; user-select: none; will-change: transform; }
+  .card.dragging { transition: none; }
+  .card.d1 { transform: scale(.96) translateY(-12px); }
+  .card.d2 { transform: scale(.92) translateY(-24px); }
+  .card.d1 > *, .card.d2 > * { visibility: hidden; }
+  .meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 13px; }
+  .pill { padding: 3px 10px; border-radius: 999px; background: var(--bg); color: var(--hint); }
+  .pill.score { background: var(--accent); color: var(--accent-text); font-weight: 600; }
+  .pill.urgent { color: var(--warn); font-weight: 600; }
+  .text { font-size: 19px; line-height: 1.4; flex: 1; overflow: auto; }
+  .open { align-self: flex-start; color: var(--accent); text-decoration: none; font-weight: 600; padding: 6px 0; }
+  .stamp { position: absolute; top: 18px; font-weight: 800; font-size: 22px; letter-spacing: .5px; padding: 4px 12px;
+           border: 3px solid; border-radius: 10px; opacity: 0; pointer-events: none; }
+  .stamp.yes { right: 18px; color: var(--yes); transform: rotate(8deg); }
+  .stamp.no { left: 18px; color: var(--no); transform: rotate(-8deg); }
+  .actions { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+  button { font: inherit; border: 0; border-radius: 14px; padding: 14px 6px; cursor: pointer; background: var(--card); color: var(--text); }
+  button.no { color: var(--no); } button.yes { color: var(--yes); }
+  button.apply { background: var(--accent); color: var(--accent-text); }
+  button:disabled { opacity: .4; cursor: default; }
+  .tools { display: flex; justify-content: space-between; margin-top: 10px; }
+  .tools button { padding: 8px 12px; font-size: 14px; color: var(--hint); background: transparent; }
+  .empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+           text-align: center; gap: 10px; color: var(--hint); padding: 24px; }
+  .empty b { color: var(--text); font-size: 20px; }
+  @media (prefers-reduced-motion: reduce) { .card { transition: none; } }
+</style>
+</head>
+<body>
+<main>
+  <header><span id="counter">Загрузка…</span><span id="updated"></span></header>
+  <div class="stack" id="stack"></div>
+  <div class="actions">
+    <button class="no" id="btnNo" aria-label="Не интересно">✖ Не интересно</button>
+    <button class="yes" id="btnYes" aria-label="Интересно">⭐ Интересно</button>
+    <button class="apply" id="btnApply" aria-label="Подаюсь">✅ Подаюсь</button>
+  </div>
+  <div class="tools"><button id="btnUndo">↩️ Отменить</button><button id="btnSend">Отправить боту</button></div>
+</main>
+<script>
+(() => {
+  const tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+  const SWIPE_AT = 90;
+  const stack = document.getElementById('stack');
+  const counter = document.getElementById('counter');
+  const updated = document.getElementById('updated');
+  const $ = (id) => document.getElementById(id);
+  const btns = { no: $('btnNo'), yes: $('btnYes'), apply: $('btnApply'), undo: $('btnUndo'), send: $('btnSend') };
+  let cards = [], index = 0, swipes = [], sent = false;
+  const store = { get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+                  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} } };
+
+  function safeLink(url) { try { const u = new URL(url); return /^https?:$/.test(u.protocol) ? u.href : null; } catch (e) { return null; } }
+  function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; }
+
+  function render() {
+    stack.textContent = '';
+    const left = cards.length - index;
+    counter.textContent = left > 0 ? `Осталось: ${left}` : 'Всё просмотрено';
+    if (left <= 0) {
+      const empty = el('div', 'empty');
+      empty.append(el('b', '', cards.length ? 'Карточки закончились' : 'Пока нет новых возможностей'),
+                   el('span', '', swipes.length ? 'Нажмите «Отправить боту», чтобы сохранить выбор.' : 'Загляните позже.'));
+      stack.append(empty);
+    }
+    cards.slice(index, index + 3).reverse().forEach((c, i, arr) => stack.append(buildCard(c, arr.length - 1 - i)));
+    btns.no.disabled = btns.yes.disabled = btns.apply.disabled = left <= 0;
+    btns.undo.disabled = swipes.length === 0;
+    btns.send.disabled = swipes.length === 0 || sent;
+    btns.send.textContent = swipes.length ? `Отправить боту (${swipes.length})` : 'Отправить боту';
+    if (tg && tg.MainButton) {
+      if (swipes.length && !sent) { tg.MainButton.setText(`Отправить боту (${swipes.length})`); tg.MainButton.show(); }
+      else tg.MainButton.hide();
+    }
+  }
+
+  function buildCard(c, depth) {
+    const top = depth === 0;
+    const card = el('div', 'card' + (depth ? ' d' + depth : ''));
+    const meta = el('div', 'meta');
+    meta.append(el('span', 'pill score', `${c.score}/10`), el('span', 'pill', c.region === 'kz' ? '🇰🇿 Казахстан' : '🌍 Онлайн / за рубежом'));
+    if (c.deadline) {
+      const urgent = typeof c.days === 'number' && c.days <= 3;
+      meta.append(el('span', 'pill' + (urgent ? ' urgent' : ''),
+        (urgent ? '⏰ ' : 'Срок: ') + c.deadline + (typeof c.days === 'number' ? ` (${c.days} дн.)` : '')));
+    }
+    card.append(meta, el('div', 'text', c.text));
+    const href = safeLink(c.link);
+    if (href) {
+      const a = el('a', 'open', 'Открыть источник ↗'); a.href = href; a.target = '_blank'; a.rel = 'noopener noreferrer';
+      a.addEventListener('click', (e) => { if (tg) { e.preventDefault(); href.startsWith('https://t.me/') ? tg.openTelegramLink(href) : tg.openLink(href); } });
+      card.append(a);
+    }
+    const yes = el('div', 'stamp yes', 'ИНТЕРЕСНО'), no = el('div', 'stamp no', 'НЕ ТО');
+    card.append(yes, no);
+    if (top) attachDrag(card, yes, no);
+    return card;
+  }
+
+  function attachDrag(card, yes, no) {
+    let startX = 0, dx = 0, active = false;
+    card.addEventListener('pointerdown', (e) => { if (e.target.closest('a')) return; active = true; startX = e.clientX; dx = 0;
+      card.classList.add('dragging'); card.setPointerCapture(e.pointerId); });
+    card.addEventListener('pointermove', (e) => { if (!active) return; dx = e.clientX - startX;
+      card.style.transform = `translateX(${dx}px) rotate(${dx / 18}deg)`;
+      yes.style.opacity = Math.max(0, Math.min(1, dx / SWIPE_AT)); no.style.opacity = Math.max(0, Math.min(1, -dx / SWIPE_AT)); });
+    const end = () => { if (!active) return; active = false; card.classList.remove('dragging');
+      if (dx > SWIPE_AT) decide('save'); else if (dx < -SWIPE_AT) decide('skip');
+      else { card.style.transform = ''; yes.style.opacity = no.style.opacity = 0; } };
+    card.addEventListener('pointerup', end); card.addEventListener('pointercancel', end);
+  }
+
+  function decide(action) {
+    if (index >= cards.length) return;
+    const top = stack.lastElementChild;
+    if (top && top.classList.contains('card')) {
+      top.classList.remove('dragging');
+      top.style.transform = `translateX(${action === 'skip' ? -140 : 140}%) rotate(${action === 'skip' ? -20 : 20}deg)`;
+      top.style.opacity = 0;
+    }
+    swipes.push({ id: cards[index].id, a: action }); index++; persist();
+    if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
+    setTimeout(render, 180);
+  }
+
+  function undo() { if (!swipes.length) return; swipes.pop(); index--; persist(); render(); }
+  function persist() { store.set('swipes', JSON.stringify({ swipes })); }
+
+  function send() {
+    if (!swipes.length || sent) return;
+    const data = JSON.stringify({ swipes });
+    // При запуске с клавиатурной кнопки initData пуст, поэтому проверяем платформу.
+    const inTelegram = !!(tg && tg.platform && tg.platform !== 'unknown');
+    if (!inTelegram) { alert('Откройте страницу из Telegram (кнопка «Свайпы» в чате с ботом), чтобы отправить выбор.'); return; }
+    try { sent = true; tg.sendData(data); store.set('swipes', ''); }
+    catch (e) { sent = false; alert('Откройте приложение кнопкой «🃏 Свайпы» внизу чата с ботом: только так выбор можно отправить.'); }
+  }
+
+  btns.no.onclick = () => decide('skip'); btns.yes.onclick = () => decide('save'); btns.apply.onclick = () => decide('apply');
+  btns.undo.onclick = undo; btns.send.onclick = send;
+  if (tg && tg.MainButton) tg.MainButton.onClick(send);
+  document.addEventListener('keydown', (e) => { if (e.key === 'ArrowRight') decide('save'); else if (e.key === 'ArrowLeft') decide('skip'); });
+
+  fetch('cards.json?t=' + Date.now(), { cache: 'no-store' }).then((r) => r.json()).then((data) => {
+    cards = Array.isArray(data.cards) ? data.cards : [];
+    updated.dataset.gen = data.generated_at || '';
+    if (data.generated_at) updated.textContent = 'обновлено ' + new Date(data.generated_at).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    try {  // возвращаем уже сделанный выбор для карточек, которые всё ещё есть в списке
+      const saved = JSON.parse(store.get('swipes') || 'null');
+      if (saved && Array.isArray(saved.swipes)) {
+        const byId = new Map(cards.map((c) => [c.id, c]));
+        const kept = saved.swipes.filter((x) => byId.has(x.id));
+        const keptIds = new Set(kept.map((x) => x.id));
+        cards = kept.map((x) => byId.get(x.id)).concat(cards.filter((c) => !keptIds.has(c.id)));
+        swipes = kept; index = kept.length;
+      }
+    } catch (e) {}
+    render();
+  }).catch(() => { counter.textContent = 'Не удалось загрузить карточки'; });
+})();
+</script>
+</body>
+</html>
